@@ -1,0 +1,25 @@
+{
+  "description": "故意缺边夹具：占用按回收关账，但没有 reclaim_edges 行。装载后 /api/reclaim/edges 必须 ok=false 且报 missing_edge。",
+  "occupancies": [
+    {
+      "id": "OCC-MISSING-EDGE-1",
+      "cell_id": "CAB-A-04",
+      "tracking_no": "TN-LEGACY-1",
+      "opened_at": "2026-11-01T02:00:00Z",
+      "closed_at": "2026-11-10T02:00:00Z",
+      "status": "released",
+      "close_reason": "reclaim",
+      "last_event_id": null
+    }
+  ],
+  "proofs": [
+    {
+      "occupancy_id": "OCC-MISSING-EDGE-1",
+      "cell_id": "CAB-A-04",
+      "tracking_no": "TN-LEGACY-1",
+      "opened_at": "2026-11-01T02:00:00Z",
+      "closed_at": "2026-11-10T02:00:00Z",
+      "event_ids": ["E-LEGACY-1"]
+    }
+  ]
+}

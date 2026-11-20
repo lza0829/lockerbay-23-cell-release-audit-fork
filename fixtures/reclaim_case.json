@@ -1,0 +1,15 @@
+{
+  "description": "本地超时回收夹具：一笔 2026-11-10 投柜、至今未取，截止已过。装载后跑 /api/reclaim/scan 即走同事务回收。",
+  "scan_as_of": "2026-11-20T06:00:00Z",
+  "events": [
+    {
+      "id": "E-OVD-1",
+      "cabinet_id": "CAB-B",
+      "cell_id": "CAB-B-02",
+      "event_type": "drop",
+      "event_ts": "2026-11-10T08:00:00Z",
+      "tracking_no": "TN-OVD-1",
+      "payload": {}
+    }
+  ]
+}
