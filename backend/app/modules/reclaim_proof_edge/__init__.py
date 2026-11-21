@@ -1,20 +1,24 @@
 """回收边与核证同源（实现）。
 
-形态择一：本模块采用**独立 reclaim_edges 表**（不采用 occupancy_proofs 追加段）。
+形态择一：本模块采用**独立 reclaim_edges 表**（不采用 occupancy_proofs 追加段）；
+格口释放审计另由独立 cell_release_audits 表承载（见 cell_release_audit 模块）。
 
-失败闭择一：本模块采用**关占用与写边同事务**——
-先 INSERT 回收边（此时占用仍为 occupied），再 UPDATE 占用为 released，
-最后在同一事务内给占用核证 occupancy_proofs 盖 closed_at。
+失败闭择一：本模块采用**关占用与写边、写释放审计同事务**——
+先 INSERT 回收边（此时占用仍为 occupied），再 INSERT 格口释放审计
+（cell_id、occupancy_id、released_at、边键与边对撞），最后 UPDATE 占用为 released，
+同一事务内给占用核证 occupancy_proofs 盖 closed_at、把格口翻 free。
 SQLite 触发器保证：
   * 任何 occupied -> released 的关账都必须带 close_reason；
-  * close_reason='reclaim' 的关账必须已经存在同占用的回收边；
-  * 回收边只能在占用仍开放时写入，且必须指向该占用自己的核证；
-  * 回收边不可更新、不可删除（不可变审计行）。
+  * close_reason='reclaim' 的关账必须已经存在同占用的回收边与同源释放审计；
+  * 回收边 / 释放审计只能在占用仍开放时写入，且必须与核证/边同源；
+  * 回收边与释放审计均不可更新、不可删除（不可变审计行）；
+  * 关账后格口无其他开放占用时，触发器兜底翻 free，杜绝幽灵占用角标。
 
 无边则核证校验失败：`validate_edges()` 会同时检查
   * 回收关闭的占用缺边（missing_edge）；
   * 有边但占用仍 occupied（occupancy_still_open）；
   * 边与占用状态 / 关闭时刻 / 核证 / 小时快照 对不上。
+释放审计三联（边、审计、格口 free）由 cell_release_audit.validate_releases() 核证。
 """
 
 from __future__ import annotations
@@ -23,6 +27,8 @@ import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+from app.modules import cell_release_audit
 
 STATUS = "implemented"
 
@@ -207,9 +213,9 @@ def reclaim_occupancy(
     overdue_hours: int | None = None,
     reason: str = REASON_OVERDUE,
 ) -> dict[str, Any]:
-    """同事务关账：写边 -> 关占用 -> 核证盖关闭时刻。
+    """同事务关账：写边 -> 写格口释放审计 -> 关占用 -> 核证盖关闭时刻 -> 格口 free。
 
-    任一步失败整体回滚；不存在「占用已 released 但无回收边」的提交态。
+    任一步失败整体回滚；不存在「占用已 released 但无回收边/释放审计」的提交态。
     """
     at = normalize_ts(as_of)
     hours = int(overdue_hours if overdue_hours is not None else _read_overdue_hours(conn))
@@ -241,6 +247,13 @@ def reclaim_occupancy(
         edge_id = _insert_edge(
             conn, occ, proof, as_of=at, overdue_hours=hours, reason=reason
         )
+        edge_row = _edge_row(conn, occupancy_id)
+        # 关账同事务写边并写释放审计：审计必须在占用仍 occupied 时与边对撞写入，
+        # 随后的关账触发器会再核一遍同源关系，缺一回滚。
+        try:
+            release_audit_id = cell_release_audit.insert_release_audit(conn, edge_row)
+        except cell_release_audit.ReleaseAuditError as exc:
+            raise ReclaimError(exc.code, exc.message) from exc
         bucket = hour_bucket(at)
         snapshot = json.loads(
             conn.execute(
@@ -261,6 +274,7 @@ def reclaim_occupancy(
             "UPDATE occupancy_proofs SET closed_at=? WHERE id=?",
             (at, proof["id"]),
         )
+        # 应用层显式翻 free；trg_occ_release_frees_cell 同时做库级兜底，防幽灵角标。
         conn.execute("UPDATE cells SET status='free' WHERE id=?", (occ["cell_id"],))
         conn.commit()
     except Exception:
@@ -269,6 +283,7 @@ def reclaim_occupancy(
 
     return {
         "edge_id": edge_id,
+        "release_audit_id": release_audit_id,
         "occupancy_id": occupancy_id,
         "cell_id": occ["cell_id"],
         "tracking_no": occ["tracking_no"],

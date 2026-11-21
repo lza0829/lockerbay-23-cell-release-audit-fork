@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Body, HTTPException, Query
 
 from app.db import connect
+from app.modules import cell_release_audit as release_audit
 from app.modules import reclaim_proof_edge as edge_reclaim
 from app.seed import overdue_hours
 from app.services import bay as bay_svc
@@ -208,14 +209,48 @@ def load_reclaim_fixture(name: str):
     finally:
         conn.close()
 
-# --- plant routes ---
-from app.modules import cell_release_audit as release_audit
+# ---------------------------------------------------------------- 格口释放审计（只读核证）
+
 
 @router.get("/cell-release-audits")
 def cell_release_audits():
+    """只读：逐行格口释放审计，附与回收边/占用/格口 free 的核对结论。"""
     conn = connect()
     try:
         return release_audit.list_releases(conn)
+    finally:
+        conn.close()
+
+
+@router.get("/cell-release-audits/verify")
+def cell_release_audit_verify():
+    """只读核证页：边、释放审计、格口 free 三联互证；有分叉/缺行/幽灵角标时 ok=false。"""
+    conn = connect()
+    try:
+        return release_audit.validate_releases(conn)
+    finally:
+        conn.close()
+
+
+@router.get("/cells/reconcile")
+def cells_reconcile():
+    """只读：格口态物化对账，抓幽灵占用角标 / 假空闲。"""
+    conn = connect()
+    try:
+        return release_audit.reconcile_cells(conn)
+    finally:
+        conn.close()
+
+
+@router.get("/occupancies/{occupancy_id}/release-trace")
+def release_trace(occupancy_id: str):
+    """由占用追到释放审计、回收边、占用关账行与格口态；无审计即核证失败。"""
+    conn = connect()
+    try:
+        trace = release_audit.trace_release(conn, occupancy_id)
+        if trace is None:
+            raise HTTPException(404, f"占用不存在：{occupancy_id}")
+        return trace
     finally:
         conn.close()
 

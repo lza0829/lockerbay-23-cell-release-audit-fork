@@ -26,6 +26,9 @@ export const api = {
     req(`/api/reclaim/occupancies/${encodeURIComponent(id)}`, { method: 'POST', body: JSON.stringify(body) }),
   reclaimEdges: () => req('/api/reclaim/edges'),
   reclaimTrace: (id) => req(`/api/occupancies/${encodeURIComponent(id)}/reclaim-trace`),
-  loadReclaimFixture: (name) => req(`/api/reclaim/fixtures/${name}`, { method: 'POST', body: '{}' }),
   cellReleaseAudits: () => req('/api/cell-release-audits'),
+  cellReleaseVerify: () => req('/api/cell-release-audits/verify'),
+  cellsReconcile: () => req('/api/cells/reconcile'),
+  releaseTrace: (id) => req(`/api/occupancies/${encodeURIComponent(id)}/release-trace`),
+  loadReclaimFixture: (name) => req(`/api/reclaim/fixtures/${name}`, { method: 'POST', body: '{}' }),
 }

@@ -6,10 +6,13 @@ const rows = ref([])
 const q = ref([])
 const candidates = ref([])
 const verify = ref(null)
+const releaseVerify = ref(null)
+const releaseAudits = ref([])
 const scan = ref(null)
 const asOf = ref('2026-11-20T06:00:00Z')
 const message = ref('')
 const trace = ref(null)
+const releaseTraceData = ref(null)
 const busy = ref(false)
 
 const verdict = computed(() => {
@@ -17,11 +20,22 @@ const verdict = computed(() => {
   return verify.value.ok ? '核对一致' : `核对失败 · ${verify.value.failures.length} 项`
 })
 
+const releaseVerdict = computed(() => {
+  if (!releaseVerify.value) return ''
+  return releaseVerify.value.ok
+    ? '三联一致（边 · 释放审计 · 格口 free）'
+    : `三联核证失败 · ${releaseVerify.value.failures.length} 项`
+})
+
 async function loadAll() {
-  const [occ, quar, edges] = await Promise.all([api.occupancies(), api.quarantine(), api.reclaimEdges()])
+  const [occ, quar, edges, releases] = await Promise.all([
+    api.occupancies(), api.quarantine(), api.reclaimEdges(), api.cellReleaseVerify(),
+  ])
   rows.value = occ
   q.value = quar
   verify.value = edges
+  releaseVerify.value = releases
+  releaseAudits.value = releases.audits || []
   await loadCandidates()
 }
 
@@ -52,7 +66,7 @@ async function reclaimOne(id) {
   busy.value = true
   try {
     const r = await api.reclaimOne(id, { as_of: asOf.value || undefined })
-    message.value = `已回收 ${r.occupancy_id}，回收边 ${r.edge_id}`
+    message.value = `已回收 ${r.occupancy_id}，回收边 ${r.edge_id}，释放审计 #${r.release_audit_id}`
     await loadAll()
   } catch (e) {
     message.value = String(e.message || e)
@@ -63,6 +77,10 @@ async function reclaimOne(id) {
 
 async function showTrace(id) {
   trace.value = await api.reclaimTrace(id)
+}
+
+async function showReleaseTrace(id) {
+  releaseTraceData.value = await api.releaseTrace(id)
 }
 
 async function loadFixture(name) {
@@ -105,6 +123,25 @@ onMounted(loadAll)
       <span class="sub" style="margin:0">只读核对 · {{ verify.generated_at }}</span>
     </div>
 
+    <div class="panel verdict" :class="releaseVerify?.ok ? 'ok' : 'bad'" v-if="releaseVerify" style="margin-top:.75rem">
+      <b>{{ releaseVerdict }}</b>
+      <span>释放审计 {{ releaseVerify.audit_count }} · 回收边 {{ releaseVerify.edge_count }} · 缺审计 {{ releaseVerify.missing_audit_count }} · 格口态漂移 {{ releaseVerify.cell_mismatch_count }}</span>
+      <span class="sub" style="margin:0">边 / 释放审计 / 格口 free 三联只读核证 · {{ releaseVerify.generated_at }}</span>
+    </div>
+
+    <div class="panel" v-if="releaseVerify && !releaseVerify.ok" style="margin-top:.75rem">
+      <h2 style="margin:0 0 .5rem;font-size:1rem">核证失败项</h2>
+      <ul class="issues">
+        <li v-for="(f, i) in releaseVerify.failures" :key="`${f.code}-${f.occupancy_id}-${i}`">
+          <code>{{ f.code }}</code>
+          <span v-if="f.occupancy_id">占用 <code>{{ f.occupancy_id }}</code></span>
+          <span v-if="f.cell_id">格口 <code>{{ f.cell_id }}</code></span>
+          <span v-if="f.edge_id">边 <code>{{ f.edge_id }}</code></span>
+          {{ f.detail }}
+        </li>
+      </ul>
+    </div>
+
     <div class="panel">
       <h2 style="margin:0 0 .5rem;font-size:1rem">超时候选</h2>
       <p v-if="!candidates.length" class="sub" style="margin:0">当前裁决时刻下无超时未取占用。</p>
@@ -137,7 +174,35 @@ onMounted(loadAll)
             </td>
             <td>{{ r.close_reason || '—' }}</td>
             <td>{{ r.closed_at || '—' }}</td>
-            <td><button class="ghost" :disabled="busy" @click="showTrace(r.id)">追边</button></td>
+            <td>
+              <button class="ghost" :disabled="busy" @click="showTrace(r.id)">追边</button>
+              <button class="ghost" :disabled="busy" @click="showReleaseTrace(r.id)">释放追溯</button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="panel" style="margin-top:1rem">
+      <h2 style="margin:0 0 .5rem;font-size:1rem">格口释放审计</h2>
+      <p v-if="!releaseAudits.length" class="sub" style="margin:0">尚无释放审计行；回收一笔后这里必须出现与边同源的审计。</p>
+      <table v-else>
+        <thead>
+          <tr><th>#</th><th>占用</th><th>格口</th><th>边键</th><th>释放时刻</th><th>格口态</th><th>核对</th></tr>
+        </thead>
+        <tbody>
+          <tr v-for="a in releaseAudits" :key="a.id">
+            <td>{{ a.id }}</td>
+            <td><code>{{ a.occupancy_id }}</code></td>
+            <td>{{ a.cell_id }}</td>
+            <td><code>{{ a.edge_id }}</code></td>
+            <td>{{ a.released_at }}</td>
+            <td>
+              <span class="pill" :class="a.cell_status === 'free' ? 'released' : 'occupied'">{{ a.cell_status }}</span>
+            </td>
+            <td>
+              <span class="pill" :class="a.ok ? 'released' : 'occupied'">{{ a.ok ? '一致' : `失败 ${a.issues.length}` }}</span>
+            </td>
           </tr>
         </tbody>
       </table>
@@ -166,6 +231,33 @@ onMounted(loadAll)
       </table>
       <ul v-if="trace.issues.length" class="issues">
         <li v-for="i in trace.issues" :key="i.code"><code>{{ i.code }}</code> {{ i.detail }}</li>
+      </ul>
+    </div>
+
+    <div class="panel" style="margin-top:1rem" v-if="releaseTraceData">
+      <h2 style="margin:0 0 .5rem;font-size:1rem">
+        释放追溯 {{ releaseTraceData.occupancy.id }}
+        <span class="pill" :class="releaseTraceData.ok ? 'released' : 'occupied'">{{ releaseTraceData.ok ? '三联一致' : '核证失败' }}</span>
+      </h2>
+      <p v-if="!releaseTraceData.audit" class="sub" style="margin:0">
+        该占用无格口释放审计{{ releaseTraceData.edge ? '（回收边已落，审计缺行）' : '' }}。
+      </p>
+      <table v-if="releaseTraceData.audit">
+        <thead><tr><th>审计 #</th><th>格口</th><th>边键</th><th>释放时刻</th><th>边关闭时刻</th><th>格口态</th><th>格口开放占用数</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>{{ releaseTraceData.audit.id }}</td>
+            <td>{{ releaseTraceData.audit.cell_id }}</td>
+            <td><code>{{ releaseTraceData.audit.edge_id }}</code></td>
+            <td>{{ releaseTraceData.audit.released_at }}</td>
+            <td>{{ releaseTraceData.edge?.closed_at || '—' }}</td>
+            <td>{{ releaseTraceData.cell?.status || '—' }}</td>
+            <td>{{ releaseTraceData.open_occupancies_on_cell }}</td>
+          </tr>
+        </tbody>
+      </table>
+      <ul v-if="releaseTraceData.issues.length" class="issues">
+        <li v-for="i in releaseTraceData.issues" :key="i.code"><code>{{ i.code }}</code> {{ i.detail }}</li>
       </ul>
     </div>
 

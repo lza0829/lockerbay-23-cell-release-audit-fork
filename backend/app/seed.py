@@ -92,12 +92,31 @@ CREATE TABLE IF NOT EXISTS reclaim_edges (
   UNIQUE(occupancy_id)
 );
 
+-- 格口释放审计（形态择一：独立 cell_release_audits 表，不采用回收边快照列）。
+-- 每个被释放的占用恰好一行：cell_id/occupancy_id/released_at/edge_id（边键）
+-- 与回收边、occupancies 关账行同源同事务写入，不可更新、不可删除。
+CREATE TABLE IF NOT EXISTS cell_release_audits (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  occupancy_id TEXT NOT NULL,
+  cell_id TEXT NOT NULL,
+  edge_id TEXT NOT NULL,
+  released_at TEXT NOT NULL,
+  close_reason TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(occupancy_id),
+  UNIQUE(edge_id),
+  FOREIGN KEY (occupancy_id) REFERENCES occupancies(id),
+  FOREIGN KEY (edge_id) REFERENCES reclaim_edges(id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_reclaim_edges_decided_at ON reclaim_edges(decided_at);
+CREATE INDEX IF NOT EXISTS idx_release_audits_cell ON cell_release_audits(cell_id, released_at);
 CREATE INDEX IF NOT EXISTS idx_occupancies_status ON occupancies(status);
 """
 
-# 失败闭：任何关账都要留关闭原因；回收关账必须已有同占用回收边；
-# 边只能在占用开放时写入，且不可变。应用层已同事务写入，这里是库级兜底。
+# 失败闭：任何关账都要留关闭原因；回收关账必须已有同占用回收边，
+# 且必须已有与边同源（边键/格口/释放时刻一致）的格口释放审计；
+# 边与审计只能在占用开放时写入，且均不可变。应用层已同事务写入，这里是库级兜底。
 TRIGGERS = """
 CREATE TRIGGER IF NOT EXISTS trg_occ_close_requires_reason
 BEFORE UPDATE OF status, closed_at ON occupancies
@@ -112,6 +131,17 @@ BEGIN
      AND NOT EXISTS (SELECT 1 FROM reclaim_edges WHERE occupancy_id = NEW.id)
     THEN RAISE(ABORT, '回收关闭占用必须先写回收边')
   END;
+  SELECT CASE
+    WHEN NEW.close_reason = 'reclaim'
+     AND NOT EXISTS (
+       SELECT 1 FROM cell_release_audits a
+       WHERE a.occupancy_id = NEW.id
+         AND a.cell_id = NEW.cell_id
+         AND a.released_at = NEW.closed_at
+         AND a.edge_id = (SELECT id FROM reclaim_edges WHERE occupancy_id = NEW.id)
+     )
+    THEN RAISE(ABORT, '回收关账必须同事务写格口释放审计，且 cell_id/释放时刻与边一致')
+  END;
 END;
 
 CREATE TRIGGER IF NOT EXISTS trg_occ_reclaim_requires_edge
@@ -122,6 +152,29 @@ BEGIN
     WHEN NOT EXISTS (SELECT 1 FROM reclaim_edges WHERE occupancy_id = NEW.id)
     THEN RAISE(ABORT, '回收关闭占用必须先写回收边')
   END;
+  SELECT CASE
+    WHEN NOT EXISTS (
+      SELECT 1 FROM cell_release_audits a
+      WHERE a.occupancy_id = NEW.id
+        AND a.cell_id = NEW.cell_id
+        AND a.released_at = NEW.closed_at
+        AND a.edge_id = (SELECT id FROM reclaim_edges WHERE occupancy_id = NEW.id)
+    )
+    THEN RAISE(ABORT, '回收关账必须同事务写格口释放审计，且 cell_id/释放时刻与边一致')
+  END;
+END;
+
+-- 关账即物化格口 free：若该格口已无其他开放占用，库级兜底翻 free，杜绝幽灵占用角标。
+CREATE TRIGGER IF NOT EXISTS trg_occ_release_frees_cell
+AFTER UPDATE OF status ON occupancies
+WHEN NEW.status = 'released' AND OLD.status <> 'released'
+ AND NOT EXISTS (
+   SELECT 1 FROM occupancies
+    WHERE cell_id = NEW.cell_id AND status = 'occupied' AND id <> NEW.id
+ )
+BEGIN
+  UPDATE cells SET status = 'free'
+   WHERE id = NEW.cell_id AND status <> 'free';
 END;
 
 CREATE TRIGGER IF NOT EXISTS trg_edge_requires_open_occupancy
@@ -164,6 +217,41 @@ BEFORE DELETE ON occupancies
 WHEN EXISTS (SELECT 1 FROM reclaim_edges WHERE occupancy_id = OLD.id)
 BEGIN
   SELECT RAISE(ABORT, '有回收边的占用不可删除');
+END;
+
+-- 格口释放审计写入对撞：必须指向仍开放占用的回收边（边键），
+-- 且 cell_id / released_at 与边和占用完全一致；边键即外键，天然不可串到邻格。
+CREATE TRIGGER IF NOT EXISTS trg_release_audit_matches_edge
+BEFORE INSERT ON cell_release_audits
+BEGIN
+  SELECT CASE
+    WHEN NOT EXISTS (
+      SELECT 1 FROM reclaim_edges e
+      WHERE e.id = NEW.edge_id AND e.occupancy_id = NEW.occupancy_id
+        AND e.cell_id = NEW.cell_id AND e.closed_at = NEW.released_at
+    )
+    THEN RAISE(ABORT, '释放审计必须与回收边同源（边键/格口/释放时刻一致）')
+  END;
+  SELECT CASE
+    WHEN NOT EXISTS (
+      SELECT 1 FROM occupancies
+       WHERE id = NEW.occupancy_id AND cell_id = NEW.cell_id
+         AND status = 'occupied' AND closed_at IS NULL
+    )
+    THEN RAISE(ABORT, '释放审计只能写在仍开放的占用上')
+  END;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_release_audit_no_update
+BEFORE UPDATE ON cell_release_audits
+BEGIN
+  SELECT RAISE(ABORT, '格口释放审计不可变');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_release_audit_no_delete
+BEFORE DELETE ON cell_release_audits
+BEGIN
+  SELECT RAISE(ABORT, '格口释放审计不可删除');
 END;
 """
 

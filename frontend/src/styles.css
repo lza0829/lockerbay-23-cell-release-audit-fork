@@ -147,6 +147,12 @@ h1 { margin: 0 0 .35rem; font-size: 1.35rem; font-weight: 600; }
 }
 .cell.free .dot { background: var(--free); box-shadow: 0 0 8px rgba(61,155,122,.6); }
 .cell.occupied .dot { background: var(--busy); box-shadow: 0 0 8px rgba(217,119,87,.55); }
+.cell.drift { box-shadow: inset 0 0 0 2px var(--over); }
+.cell .drift-tag code {
+  display: inline-block; margin-top: 2px; padding: 0 4px;
+  font-size: .66rem; color: #e6a3ad; border: 1px solid #6b3a44; border-radius: 3px;
+}
+.stat.bad b { color: var(--over); }
 
 button, .btn {
   font: inherit;
